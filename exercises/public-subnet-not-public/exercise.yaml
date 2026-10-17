@@ -1,0 +1,65 @@
+title: The public subnet that is not public
+summary: Find out what really makes a subnet public.
+task: |
+  VPC `shop` has two subnets, `public` and `private`, and an attached internet
+  gateway. The web server `web` in `public` has an Elastic IP and a security
+  group that allows port 80. Still, nobody reaches the website, and `web`
+  cannot reach the internet.
+
+  Make `web` reachable from the internet on port 80, and let it reach the
+  internet.
+
+  Rules:
+  - The app server `app` in `private` still has an Elastic IP from an old
+    migration, and its security group allows port 8080 from anywhere. Do not
+    change either. `app` must stay unreachable from the internet and must not
+    reach the internet.
+hints:
+  - "An internet gateway alone does not make a subnet public. The route table of the subnet decides. Which route table does `public` use? aws ec2 describe-route-tables --filters Name=vpc-id,Values=<vpc-id>"
+  - "A subnet without an explicit association uses the main route table. The route table `public-rt` already has a route to the internet gateway, but no subnet uses it."
+  - "Associate `public-rt` with the subnet `public`. Do not add the route to the main route table: `private` uses that table too."
+resources:
+  vpcs:
+    - {name: shop, cidr: 10.13.0.0/16}
+  subnets:
+    - {name: public, vpc: shop, cidr: 10.13.1.0/24}
+    - {name: private, vpc: shop, cidr: 10.13.2.0/24}
+  internetGateways:
+    - {name: shop-igw, vpc: shop}
+  routeTables:
+    - name: public-rt
+      vpc: shop
+      routes: [{destination: 0.0.0.0/0, gateway: shop-igw}]
+  securityGroups:
+    - name: web-sg
+      vpc: shop
+      ingress:
+        - {protocol: tcp, ports: "80", cidr: 0.0.0.0/0}
+    - name: app-sg
+      vpc: shop
+      ingress:
+        - {protocol: tcp, ports: "8080", cidr: 0.0.0.0/0}
+  instances:
+    - {name: web, subnet: public, securityGroups: [web-sg], elasticIp: true}
+    - {name: app, subnet: private, securityGroups: [app-sg], elasticIp: true}
+checks:
+  - name: Visitors open the website on port 80
+    from: operator
+    to: web.public
+    port: 80
+    expect: open
+  - name: web reaches the internet
+    from: web
+    to: echo
+    port: 80
+    expect: open
+  - name: app is unreachable from the internet
+    from: operator
+    to: app.public
+    port: 8080
+    expect: closed
+  - name: app does not reach the internet
+    from: app
+    to: echo
+    port: 80
+    expect: closed

@@ -1,0 +1,17 @@
+# Floci acts purely as the AWS control plane. EC2 runs in mock mode so Floci
+# never creates containers or networks; vpcsim builds the data plane instead.
+services:
+  floci:
+    image: floci/floci:2.3.0
+    restart: unless-stopped # WSL stops idle distros; bring Floci back on the next start
+    ports:
+      - "4566:4566"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+    environment:
+      FLOCI_STORAGE_MODE: hybrid
+      FLOCI_SERVICES_EC2_MOCK: "true"
+      FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED: "true"
+      FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED: "true"
+      FLOCI_SERVICES_S3_ENFORCE_AUTH: "true"

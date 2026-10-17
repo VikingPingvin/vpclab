@@ -1,0 +1,54 @@
+title: The website is unreachable
+summary: Fix a security group so the web server answers on port 80, without exposing SSH.
+task: |
+  The web server `web` runs in the public subnet of VPC `shop`. It has an
+  Elastic IP, and the subnet routes to an internet gateway. Still, customers
+  cannot open the website on port 80.
+
+  Make port 80 on `web` reachable from the internet.
+
+  Rules:
+  - SSH (port 22) on `web` stays closed to the internet.
+  - Administrators still reach `web` on port 22 from the `bastion` instance.
+hints:
+  - "Compare the ports in the security group `web-sg` of `web` with the port that the website uses: aws ec2 describe-security-groups --filters Name=group-name,Values=web-sg"
+  - "Add an ingress rule for TCP port 80 from 0.0.0.0/0. Do not allow all traffic from 0.0.0.0/0: that also opens port 22."
+resources:
+  vpcs:
+    - {name: shop, cidr: 10.11.0.0/16}
+  subnets:
+    - {name: public, vpc: shop, cidr: 10.11.1.0/24}
+  internetGateways:
+    - {name: shop-igw, vpc: shop}
+  routeTables:
+    - name: public-rt
+      vpc: shop
+      routes: [{destination: 0.0.0.0/0, gateway: shop-igw}]
+      subnets: [public]
+  securityGroups:
+    - name: admin-sg
+      vpc: shop
+    - name: web-sg
+      vpc: shop
+      ingress:
+        - {protocol: tcp, ports: "8080", cidr: 0.0.0.0/0}
+        - {protocol: tcp, ports: "22", group: admin-sg}
+  instances:
+    - {name: web, subnet: public, securityGroups: [web-sg], elasticIp: true}
+    - {name: bastion, subnet: public, securityGroups: [admin-sg]}
+checks:
+  - name: Customers open the website on port 80
+    from: operator
+    to: web.public
+    port: 80
+    expect: open
+  - name: SSH on web is closed to the internet
+    from: operator
+    to: web.public
+    port: 22
+    expect: closed
+  - name: Administrators reach web on port 22 from the bastion
+    from: bastion
+    to: web
+    port: 22
+    expect: open

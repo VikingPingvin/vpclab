@@ -1,0 +1,9 @@
+/bin/
+/.cap/
+/deploy/data/
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+docs/

@@ -1,0 +1,61 @@
+title: The request that never returns
+summary: Find why a network ACL lets requests in but no replies out.
+task: |
+  The web server `web` in VPC `api` has an Elastic IP, a route to the internet
+  gateway, and a security group that allows port 80. A network ACL on its
+  subnet allows port 80 in both directions. Still, requests to the website
+  hang until they time out, and `web` cannot download updates over HTTP.
+
+  Make the website reachable from the internet, and let `web` reach websites
+  on the internet over HTTP (port 80).
+
+  Rules:
+  - The security group of `web` allows SSH from anywhere. The team keeps it
+    that way for now, so the network ACL must keep SSH (port 22) closed.
+hints:
+  - "Security groups are stateful: replies pass automatically. Network ACLs are stateless: a reply is a new packet, and it needs its own rule."
+  - "A reply goes to the client's source port, not to port 80. Clients pick a random source port between 1024 and 65535 (the ephemeral ports)."
+  - "Add an outbound rule for TCP 1024-65535 (replies to visitors) and an inbound rule for TCP 1024-65535 (replies to the downloads of web). Port 22 is below 1024, so it stays closed."
+resources:
+  vpcs:
+    - {name: api, cidr: 10.12.0.0/16}
+  subnets:
+    - {name: public, vpc: api, cidr: 10.12.1.0/24}
+  internetGateways:
+    - {name: api-igw, vpc: api}
+  routeTables:
+    - name: public-rt
+      vpc: api
+      routes: [{destination: 0.0.0.0/0, gateway: api-igw}]
+      subnets: [public]
+  securityGroups:
+    - name: web-sg
+      vpc: api
+      ingress:
+        - {protocol: tcp, ports: "80", cidr: 0.0.0.0/0}
+        - {protocol: tcp, ports: "22", cidr: 0.0.0.0/0}
+  networkAcls:
+    - name: public-acl
+      vpc: api
+      subnets: [public]
+      entries:
+        - {rule: 100, direction: inbound, action: allow, protocol: tcp, ports: "80", cidr: 0.0.0.0/0}
+        - {rule: 100, direction: outbound, action: allow, protocol: tcp, ports: "80", cidr: 0.0.0.0/0}
+  instances:
+    - {name: web, subnet: public, securityGroups: [web-sg], elasticIp: true}
+checks:
+  - name: Visitors open the website on port 80
+    from: operator
+    to: web.public
+    port: 80
+    expect: open
+  - name: web downloads updates over HTTP
+    from: web
+    to: echo
+    port: 80
+    expect: open
+  - name: The network ACL keeps SSH closed
+    from: operator
+    to: web.public
+    port: 22
+    expect: closed
