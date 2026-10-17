@@ -48,22 +48,25 @@ func renderNft(idx *indexes, r *Router) string {
 
 		for _, dir := range []string{"egress", "ingress"} {
 			cw("\tchain sg_%s_%s {", dir, id)
-			for _, g := range e.Groups {
-				sg, ok := idx.sg[g]
-				if !ok {
-					continue
-				}
-				rules := sg.Egress
-				if dir == "ingress" {
-					rules = sg.Ingress
-				}
-				for _, rule := range rules {
-					for _, line := range sgRuleLines(idx, rule, dir == "ingress", referenced) {
-						cw("\t\t%s return comment %q", line, sg.ID+" "+dir)
+			// NAT gateways have no security groups: their chains are empty.
+			if e.NATGatewayID == "" {
+				for _, g := range e.Groups {
+					sg, ok := idx.sg[g]
+					if !ok {
+						continue
+					}
+					rules := sg.Egress
+					if dir == "ingress" {
+						rules = sg.Ingress
+					}
+					for _, rule := range rules {
+						for _, line := range sgRuleLines(idx, rule, dir == "ingress", referenced) {
+							cw("\t\t%s return comment %q", line, sg.ID+" "+dir)
+						}
 					}
 				}
+				cw("\t\tcounter drop comment %q", e.ID+" "+dir+": no security group rule matched")
 			}
-			cw("\t\tcounter drop comment %q", e.ID+" "+dir+": no security group rule matched")
 			cw("\t}")
 		}
 	}
@@ -140,6 +143,7 @@ func renderNft(idx *indexes, r *Router) string {
 	w("\t\ttype filter hook forward priority filter; policy drop;")
 	w("\t\tmeta nfproto != ipv4 drop")
 	if len(r.ENIs) > 0 {
+		renderLinkFilters(w, r)
 		w("\t\tiifname vmap %s", ifVmap(r.ENIs, "src"))
 		w("\t\toifname vmap %s", ifVmap(r.ENIs, "dst"))
 		w("\t\tiifname vmap %s", naclVmap("out"))

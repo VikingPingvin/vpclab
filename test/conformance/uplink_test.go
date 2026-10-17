@@ -3,10 +3,12 @@
 package conformance
 
 import (
+	"net/url"
 	"os/exec"
 	"strings"
 	"testing"
 
+	"github.com/VikingPingvin/vpclab/internal/floci"
 	"github.com/VikingPingvin/vpclab/internal/plan"
 )
 
@@ -57,7 +59,11 @@ func TestRealInternet(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		url := "http://" + strings.TrimSpace(string(gw)) + ":4566/"
+		ep, err := url.Parse(floci.Endpoint())
+		if err != nil {
+			t.Fatal(err)
+		}
+		url := "http://" + strings.TrimSpace(string(gw)) + ":" + ep.Port() + "/"
 		if out, err := e.hostSh("internet", "wget -q -O /dev/null -T 3 "+url); err != nil {
 			t.Skipf("control failed: the internet namespace cannot reach %s itself\n%s", url, out)
 		}

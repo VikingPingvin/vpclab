@@ -25,6 +25,12 @@ type EC2API interface {
 	ec2.DescribeVpcPeeringConnectionsAPIClient
 	ec2.DescribeManagedPrefixListsAPIClient
 	ec2.GetManagedPrefixListEntriesAPIClient
+	ec2.DescribeTransitGatewaysAPIClient
+	ec2.DescribeTransitGatewayVpcAttachmentsAPIClient
+	ec2.DescribeTransitGatewayAttachmentsAPIClient
+	ec2.DescribeTransitGatewayRouteTablesAPIClient
+	ec2.GetTransitGatewayRouteTablePropagationsAPIClient
+	SearchTransitGatewayRoutes(context.Context, *ec2.SearchTransitGatewayRoutesInput, ...func(*ec2.Options)) (*ec2.SearchTransitGatewayRoutesOutput, error)
 	DescribeAddresses(context.Context, *ec2.DescribeAddressesInput, ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error)
 }
 
@@ -64,6 +70,7 @@ func Fetch(ctx context.Context, c EC2API) (*Snapshot, error) {
 		{"elastic ips", fetchElasticIPs},
 		{"peering connections", fetchPeerings},
 		{"prefix lists", fetchPrefixLists},
+		{"transit gateways", fetchTransitGateways},
 	}
 	for _, st := range steps {
 		if err := st.fn(ctx, c, s); err != nil {
@@ -325,6 +332,11 @@ func fetchInstances(ctx context.Context, c EC2API, s *Snapshot) error {
 			if i.State != nil {
 				out.State = string(i.State.Name)
 			}
+			for _, t := range i.Tags {
+				if aws.ToString(t.Key) == "Name" {
+					out.Name = aws.ToString(t.Value)
+				}
+			}
 			for _, n := range i.NetworkInterfaces {
 				out.ENIs = append(out.ENIs, aws.ToString(n.NetworkInterfaceId))
 			}
@@ -471,6 +483,125 @@ func fetchPrefixLists(ctx context.Context, c EC2API, s *Snapshot) error {
 	}
 	sortByID(s.PrefixLists, func(v PrefixList) string { return v.ID })
 	return nil
+}
+
+// fetchTransitGateways reads transit gateways, their VPC attachments and
+// route tables. Only static routes are read; the planner computes the
+// propagated ones, because Floci does not create the default propagations.
+func fetchTransitGateways(ctx context.Context, c EC2API, s *Snapshot) error {
+	tgws, err := collect(ctx, ec2.NewDescribeTransitGatewaysPaginator(c, &ec2.DescribeTransitGatewaysInput{}),
+		func(o *ec2.DescribeTransitGatewaysOutput) []types.TransitGateway { return o.TransitGateways })
+	if err != nil {
+		return err
+	}
+	for _, g := range tgws {
+		if g.State == types.TransitGatewayStateDeleted || g.State == types.TransitGatewayStateDeleting {
+			continue
+		}
+		out := TransitGateway{ID: aws.ToString(g.TransitGatewayId), State: string(g.State)}
+		if o := g.Options; o != nil {
+			out.DefaultPropagation = o.DefaultRouteTablePropagation == types.DefaultRouteTablePropagationValueEnable
+			out.DefaultPropagationRT = aws.ToString(o.PropagationDefaultRouteTableId)
+		}
+		s.TransitGateways = append(s.TransitGateways, out)
+	}
+	sortByID(s.TransitGateways, func(v TransitGateway) string { return v.ID })
+
+	vpcAtts, err := collect(ctx, ec2.NewDescribeTransitGatewayVpcAttachmentsPaginator(c, &ec2.DescribeTransitGatewayVpcAttachmentsInput{}),
+		func(o *ec2.DescribeTransitGatewayVpcAttachmentsOutput) []types.TransitGatewayVpcAttachment {
+			return o.TransitGatewayVpcAttachments
+		})
+	if err != nil {
+		return err
+	}
+	// The association is only in DescribeTransitGatewayAttachments.
+	atts, err := collect(ctx, ec2.NewDescribeTransitGatewayAttachmentsPaginator(c, &ec2.DescribeTransitGatewayAttachmentsInput{}),
+		func(o *ec2.DescribeTransitGatewayAttachmentsOutput) []types.TransitGatewayAttachment {
+			return o.TransitGatewayAttachments
+		})
+	if err != nil {
+		return err
+	}
+	assoc := map[string]string{}
+	for _, a := range atts {
+		if as := a.Association; as != nil && (as.State == types.TransitGatewayAssociationStateAssociated ||
+			as.State == types.TransitGatewayAssociationStateAssociating) {
+			assoc[aws.ToString(a.TransitGatewayAttachmentId)] = aws.ToString(as.TransitGatewayRouteTableId)
+		}
+	}
+	for _, a := range vpcAtts {
+		if a.State == types.TransitGatewayAttachmentStateDeleted || a.State == types.TransitGatewayAttachmentStateDeleting {
+			continue
+		}
+		id := aws.ToString(a.TransitGatewayAttachmentId)
+		out := TGWAttachment{
+			ID:         id,
+			TGWID:      aws.ToString(a.TransitGatewayId),
+			VPCID:      aws.ToString(a.VpcId),
+			State:      string(a.State),
+			SubnetIDs:  slices.Sorted(slices.Values(a.SubnetIds)),
+			RouteTable: assoc[id],
+		}
+		s.TGWAttachments = append(s.TGWAttachments, out)
+	}
+	sortByID(s.TGWAttachments, func(v TGWAttachment) string { return v.ID })
+
+	rts, err := collect(ctx, ec2.NewDescribeTransitGatewayRouteTablesPaginator(c, &ec2.DescribeTransitGatewayRouteTablesInput{}),
+		func(o *ec2.DescribeTransitGatewayRouteTablesOutput) []types.TransitGatewayRouteTable {
+			return o.TransitGatewayRouteTables
+		})
+	if err != nil {
+		return err
+	}
+	for _, rt := range rts {
+		if rt.State == types.TransitGatewayRouteTableStateDeleted || rt.State == types.TransitGatewayRouteTableStateDeleting {
+			continue
+		}
+		id := aws.ToString(rt.TransitGatewayRouteTableId)
+		out := TGWRouteTable{ID: id, TGWID: aws.ToString(rt.TransitGatewayId)}
+		props, err := collect(ctx,
+			ec2.NewGetTransitGatewayRouteTablePropagationsPaginator(c, &ec2.GetTransitGatewayRouteTablePropagationsInput{TransitGatewayRouteTableId: &id}),
+			func(o *ec2.GetTransitGatewayRouteTablePropagationsOutput) []types.TransitGatewayRouteTablePropagation {
+				return o.TransitGatewayRouteTablePropagations
+			})
+		if err != nil {
+			return fmt.Errorf("%s propagations: %w", id, err)
+		}
+		for _, p := range props {
+			if p.State == types.TransitGatewayPropagationStateEnabled || p.State == types.TransitGatewayPropagationStateEnabling {
+				out.Propagations = append(out.Propagations, aws.ToString(p.TransitGatewayAttachmentId))
+			}
+		}
+		slices.Sort(out.Propagations)
+		routes, err := c.SearchTransitGatewayRoutes(ctx, &ec2.SearchTransitGatewayRoutesInput{
+			TransitGatewayRouteTableId: &id,
+			Filters:                    []types.Filter{{Name: aws.String("state"), Values: []string{"active", "blackhole"}}},
+		})
+		if err != nil {
+			return fmt.Errorf("%s routes: %w", id, err)
+		}
+		for _, r := range routes.Routes {
+			if r.Type != types.TransitGatewayRouteTypeStatic || r.DestinationCidrBlock == nil {
+				continue // propagated routes are computed; prefix-list routes are not simulated
+			}
+			out.Routes = append(out.Routes, TGWRoute{
+				DestinationCIDR: *r.DestinationCidrBlock,
+				AttachmentID:    tgwRouteAttachment(r),
+				Blackhole:       r.State == types.TransitGatewayRouteStateBlackhole,
+			})
+		}
+		slices.SortFunc(out.Routes, func(a, b TGWRoute) int { return strings.Compare(a.DestinationCIDR, b.DestinationCIDR) })
+		s.TGWRouteTables = append(s.TGWRouteTables, out)
+	}
+	sortByID(s.TGWRouteTables, func(v TGWRouteTable) string { return v.ID })
+	return nil
+}
+
+func tgwRouteAttachment(r types.TransitGatewayRoute) string {
+	if len(r.TransitGatewayAttachments) > 0 {
+		return aws.ToString(r.TransitGatewayAttachments[0].TransitGatewayAttachmentId)
+	}
+	return ""
 }
 
 func sortByID[T any](s []T, id func(T) string) {

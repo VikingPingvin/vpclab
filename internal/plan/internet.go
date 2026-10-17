@@ -126,8 +126,9 @@ type natKey struct {
 }
 
 // publicIPs computes the private -> public mapping for every ENI address.
-// Sources, in order: Elastic IP associations, the ENI's own association, and
-// an auto-assigned address for the primary ENI in a MapPublicIpOnLaunch subnet.
+// Sources, in order: Elastic IP associations, the ENI's own association, NAT
+// gateways, and an auto-assigned address for the primary ENI in a
+// MapPublicIpOnLaunch subnet.
 func publicIPs(s *snapshot.Snapshot, idx *indexes) map[natKey]NAT {
 	out := map[natKey]NAT{}
 	used := map[netip.Addr]bool{}
@@ -150,6 +151,13 @@ func publicIPs(s *snapshot.Snapshot, idx *indexes) map[natKey]NAT {
 	for _, e := range s.ENIs {
 		if e.PublicIP != "" && len(e.PrivateIPs) > 0 {
 			add(e.ID, e.PrivateIPs[0], e.PublicIP, false)
+		}
+	}
+	// Floci shows a NAT gateway's Elastic IP only on the NAT gateway, not
+	// in DescribeAddresses. Private NAT gateways have none.
+	for _, n := range s.NATGateways {
+		if n.Public {
+			add(n.ENIID, n.Private, n.PublicIP, false)
 		}
 	}
 	// s.ENIs is sorted by ID, so auto-assignment is deterministic.

@@ -15,3 +15,17 @@ services:
       FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED: "true"
       FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED: "true"
       FLOCI_SERVICES_S3_ENFORCE_AUTH: "true"
+
+  # Optional read-only AWS-console-style UI (github.com/liammizrahi/stackdeck).
+  # EC2/VPC pages only read; change resources with the AWS CLI.
+  # Start: vpclab dashboard (opens http://localhost:4577); stop: vpclab dashboard stop
+  dashboard:
+    profiles: [dashboard]
+    image: ghcr.io/liammizrahi/stackdeck:26.0.3
+    restart: unless-stopped
+    ports:
+      - "4577:4577"
+    environment:
+      AWS_ENDPOINT_URL: http://floci:4566
+    depends_on:
+      - floci

@@ -365,3 +365,168 @@ func TestMACIsLocallyAdministeredUnicast(t *testing.T) {
 		t.Error("mac is not deterministic")
 	}
 }
+
+// withNATGateway adds a public NAT gateway in subnet-a and routes
+// 172.16.0.0/12 from subnet-b through it.
+func withNATGateway(s *snapshot.Snapshot) *snapshot.Snapshot {
+	s = withInternet(s)
+	s.NATGateways = []snapshot.NATGateway{{
+		ID: "nat-gw1", SubnetID: "subnet-a", VPCID: "vpc-1", State: "available", Public: true,
+		ENIID: "eni-nat", Private: "10.0.1.50", PublicIP: "54.3.3.3",
+	}}
+	s.RouteTables[1].Routes = append(s.RouteTables[1].Routes,
+		snapshot.Route{DestinationCIDR: "172.16.0.0/12", TargetKind: snapshot.TargetNAT, TargetID: "nat-gw1"})
+	return s
+}
+
+func route(t *testing.T, r Router, table, dst string) Route {
+	t.Helper()
+	for _, tb := range r.Tables {
+		if tb.Name != table {
+			continue
+		}
+		for _, rt := range tb.Routes {
+			if rt.Dst.String() == dst {
+				return rt
+			}
+		}
+	}
+	t.Fatalf("no route %s in %s", dst, table)
+	return Route{}
+}
+
+func TestNATGateway(t *testing.T) {
+	p := build2(t, withNATGateway(fixture()))
+	if len(p.Warnings) != 0 {
+		t.Errorf("warnings = %v", p.Warnings)
+	}
+	r := p.Routers[0]
+	if len(r.NATGateways) != 1 || r.NATGateways[0].Container != "vpcsim-nat-gw1" {
+		t.Fatalf("NAT gateways = %+v", r.NATGateways)
+	}
+	if rs := r.NATGateways[0].Ruleset; !strings.Contains(rs, "snat ip to 10.0.1.50") || !strings.Contains(rs, "policy drop") {
+		t.Errorf("NAT gateway ruleset:\n%s", rs)
+	}
+
+	var eni ENI
+	for _, e := range r.ENIs {
+		if e.ID == "eni-nat" {
+			eni = e
+		}
+	}
+	if eni.NATGatewayID != "nat-gw1" || eni.SrcDstCheck || !eni.DefaultGW || eni.Container != "vpcsim-nat-gw1" {
+		t.Fatalf("NAT gateway ENI = %+v", eni)
+	}
+
+	if rt := route(t, r, "rtb-b", "172.16.0.0/12"); rt.Kind != RouteVia || rt.Dev != eni.RouterIf || rt.Via.String() != "10.0.1.50" {
+		t.Errorf("route to the NAT gateway = %+v, want via 10.0.1.50 dev %s", rt, eni.RouterIf)
+	}
+	// Traffic the NAT gateway sends back uses its own subnet's route table.
+	found := false
+	for _, rule := range r.Rules {
+		if rule.IifName == eni.RouterIf {
+			found = true
+			if tb := r.Tables[rule.Table-TableRTBase+1]; tb.Name != "rtb-main" {
+				t.Errorf("NAT gateway traffic uses %s, want rtb-main of subnet-a", tb.Name)
+			}
+		}
+	}
+	if !found {
+		t.Error("no ip rule for the NAT gateway's ENI")
+	}
+
+	nat := false
+	for _, n := range r.NAT {
+		if n.Private.String() == "10.0.1.50" {
+			nat = n.Public.String() == "54.3.3.3"
+		}
+	}
+	if !nat {
+		t.Errorf("IGW NAT = %+v, want 10.0.1.50 -> 54.3.3.3", r.NAT)
+	}
+
+	// No security groups, but NACLs apply.
+	id := naming.NftID("eni-nat")
+	for _, chain := range []string{"sg_egress_" + id, "sg_ingress_" + id} {
+		if body := chainBody(t, r.Ruleset, chain); strings.Contains(body, "drop") {
+			t.Errorf("%s drops traffic, but NAT gateways have no security groups:\n%s", chain, body)
+		}
+	}
+	if !strings.Contains(r.Ruleset, `"`+eni.RouterIf+`" : jump nacl_in_subnet_a`) {
+		t.Error("the NAT gateway's ENI is not subject to subnet-a's network ACL")
+	}
+}
+
+func TestNATGatewayEdgeCases(t *testing.T) {
+	s := withNATGateway(fixture())
+	s.NATGateways = append(s.NATGateways,
+		snapshot.NATGateway{ID: "nat-private", SubnetID: "subnet-a", VPCID: "vpc-1", State: "available", ENIID: "eni-pnat", Private: "10.0.1.51"},
+		snapshot.NATGateway{ID: "nat-failed", SubnetID: "subnet-a", VPCID: "vpc-1", State: "failed", ENIID: "eni-fnat", Private: "10.0.1.52"},
+	)
+	s.RouteTables[1].Routes = append(s.RouteTables[1].Routes,
+		snapshot.Route{DestinationCIDR: "100.64.0.0/10", TargetKind: snapshot.TargetNAT, TargetID: "nat-failed"},
+		snapshot.Route{DestinationCIDR: "198.51.100.0/24", TargetKind: snapshot.TargetNAT, TargetID: "nat-gone"},
+	)
+	p := build2(t, s)
+	r := p.Routers[0]
+
+	if len(r.NATGateways) != 2 {
+		t.Errorf("NAT gateways = %+v, want nat-gw1 and nat-private", r.NATGateways)
+	}
+	for _, n := range r.NAT {
+		if n.Private.String() == "10.0.1.51" {
+			t.Errorf("private NAT gateway got a public IP: %+v", n)
+		}
+	}
+	for _, dst := range []string{"100.64.0.0/10", "198.51.100.0/24"} {
+		if rt := route(t, r, "rtb-b", dst); rt.Kind != RouteBlackhole {
+			t.Errorf("%s = %+v, want blackhole", dst, rt)
+		}
+	}
+	if len(p.Warnings) != 2 || !strings.Contains(p.Warnings[0], "nat-failed") || !strings.Contains(p.Warnings[1], "nat-gone") {
+		t.Errorf("warnings = %v, want one each for nat-failed and nat-gone", p.Warnings)
+	}
+}
+
+// NAT instances and appliances: routes to an instance use its primary ENI.
+func TestInstanceAndENIRouteTargets(t *testing.T) {
+	s := fixture()
+	s.Instances[0].State = "stopped" // i-web
+	s.RouteTables[1].Routes = []snapshot.Route{
+		{DestinationCIDR: "10.0.0.0/16", TargetKind: snapshot.TargetLocal},
+		{DestinationCIDR: "0.0.0.0/0", TargetKind: snapshot.TargetInstance, TargetID: "i-other"},
+		{DestinationCIDR: "172.16.0.0/12", TargetKind: snapshot.TargetENI, TargetID: "eni-app"},
+		{DestinationCIDR: "192.168.0.0/16", TargetKind: snapshot.TargetInstance, TargetID: "i-web"},
+		// More specific than local: AWS allows this for middlebox appliances.
+		{DestinationCIDR: "10.0.1.0/24", TargetKind: snapshot.TargetENI, TargetID: "eni-other"},
+	}
+	p := build2(t, s)
+	r := p.Routers[0]
+
+	cases := []struct{ dst, via, eni string }{
+		{"0.0.0.0/0", "10.0.1.20", "eni-other"},
+		{"172.16.0.0/12", "10.0.2.10", "eni-app"},
+		{"10.0.1.0/24", "10.0.1.20", "eni-other"},
+	}
+	for _, c := range cases {
+		rt := route(t, r, "rtb-b", c.dst)
+		if rt.Kind != RouteVia || rt.Via.String() != c.via || rt.Dev != naming.RouterIf(c.eni) {
+			t.Errorf("%s = %+v, want via %s dev %s", c.dst, rt, c.via, naming.RouterIf(c.eni))
+		}
+	}
+	if rt := route(t, r, "rtb-b", "192.168.0.0/16"); rt.Kind != RouteBlackhole {
+		t.Errorf("route to the stopped i-web = %+v, want blackhole", rt)
+	}
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "i-web") {
+		t.Errorf("warnings = %v, want one about i-web", p.Warnings)
+	}
+}
+
+func TestDuplicateAddressWarning(t *testing.T) {
+	s := withNATGateway(fixture())
+	s.NATGateways[0].Private = "10.0.1.10" // eni-web's address
+	p := build2(t, s)
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "10.0.1.10") {
+		t.Errorf("warnings = %v, want one about 10.0.1.10", p.Warnings)
+	}
+}

@@ -18,6 +18,8 @@ const (
 
 	RoleRouter       = "router"
 	RoleInstance     = "instance"
+	RoleNATGateway   = "nat-gateway"
+	RoleTGW          = "transit-gateway"
 	RoleInternet     = "internet"
 	RoleInternetHost = "internet-host"
 	RoleUplink       = "uplink" // the Docker network, not a container
@@ -29,6 +31,10 @@ func RouterContainer(vpcID string) string { return "vpcsim-rtr-" + vpcID }
 
 // InstanceContainer is the container that runs an EC2 instance.
 func InstanceContainer(instanceID string) string { return "vpcsim-" + instanceID }
+
+// NATGatewayContainer is the container that owns a NAT gateway's network
+// namespace.
+func NATGatewayContainer(natID string) string { return "vpcsim-" + natID }
 
 // RouterIf is the router-side interface name for an ENI. Linux limits
 // interface names to 15 bytes, so it is a short hash of the ENI ID.
@@ -57,6 +63,19 @@ func Hostname(privateIP string) string {
 
 // NftID turns an AWS ID into a valid nftables identifier.
 func NftID(awsID string) string { return strings.ReplaceAll(awsID, "-", "_") }
+
+// TGWContainer is the container that owns a transit gateway's namespace.
+func TGWContainer(tgwID string) string { return "vpcsim-" + tgwID }
+
+// PeeringIf is the interface of a peering connection in both VPC routers.
+func PeeringIf(pcxID string) string { return "p" + short(pcxID, 11) }
+
+// AttachmentIf is the interface of a TGW attachment in the VPC router and in
+// the TGW namespace.
+func AttachmentIf(attachmentID string) string { return "a" + short(attachmentID, 11) }
+
+// VRFIf is the VRF device of a TGW route table.
+func VRFIf(routeTableID string) string { return "r" + short(routeTableID, 11) }
 
 // InternetIf is the internet-namespace end of a VPC's internet gateway link.
 func InternetIf(vpcID string) string { return "x" + short(vpcID, 11) }

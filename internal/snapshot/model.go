@@ -19,6 +19,10 @@ type Snapshot struct {
 	ElasticIPs     []ElasticIP     `json:"elasticIps"`
 	Peerings       []Peering       `json:"peerings"`
 	PrefixLists    []PrefixList    `json:"prefixLists"`
+
+	TransitGateways []TransitGateway `json:"transitGateways"`
+	TGWAttachments  []TGWAttachment  `json:"transitGatewayAttachments"` // VPC attachments only
+	TGWRouteTables  []TGWRouteTable  `json:"transitGatewayRouteTables"`
 }
 
 type VPC struct {
@@ -119,6 +123,7 @@ type ENI struct {
 
 type Instance struct {
 	ID       string          `json:"id"`
+	Name     string          `json:"name,omitempty"` // Name tag
 	ImageID  string          `json:"imageId"`
 	Type     string          `json:"type"`
 	State    string          `json:"state"`
@@ -173,4 +178,37 @@ type PrefixList struct {
 	ID    string   `json:"id"`
 	Name  string   `json:"name"`
 	CIDRs []string `json:"cidrs"`
+}
+
+type TransitGateway struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+	// DefaultPropagationRT receives a propagation from every new attachment
+	// when DefaultPropagation is on. Floci does not create these
+	// propagations, so the planner adds them.
+	DefaultPropagation   bool   `json:"defaultPropagation"`
+	DefaultPropagationRT string `json:"defaultPropagationRouteTable,omitempty"`
+}
+
+type TGWAttachment struct {
+	ID         string   `json:"id"`
+	TGWID      string   `json:"transitGatewayId"`
+	VPCID      string   `json:"vpcId"`
+	State      string   `json:"state"`
+	SubnetIDs  []string `json:"subnetIds"`
+	RouteTable string   `json:"routeTable,omitempty"` // associated TGW route table
+}
+
+type TGWRouteTable struct {
+	ID    string `json:"id"`
+	TGWID string `json:"transitGatewayId"`
+	// Propagations lists the attachments that propagate their VPC CIDRs.
+	Propagations []string   `json:"propagations"`
+	Routes       []TGWRoute `json:"routes"` // static routes only
+}
+
+type TGWRoute struct {
+	DestinationCIDR string `json:"destinationCidr"`
+	AttachmentID    string `json:"attachmentId,omitempty"`
+	Blackhole       bool   `json:"blackhole"`
 }

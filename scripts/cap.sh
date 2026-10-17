@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Build and run the exercise runner. Run scripts/vpcsim.sh run in another
-# terminal first.
+# Build and run the exercise runner. Start the lab first: scripts/vpclab.sh up.
 #   scripts/cap.sh list | start <name> | status | verify | hint | reset | stop
 set -euo pipefail
 export PATH=/usr/local/go/bin:$PATH

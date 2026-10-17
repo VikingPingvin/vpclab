@@ -130,6 +130,11 @@ func ensureRouter(ctx context.Context, r plan.Router, image string) (int, error)
 // ensureInstance starts an instance container without any network; vpcsim
 // plugs its ENIs in afterwards. NET_ADMIN lets the learner manage the OS
 // network config as root on EC2 can; filtering happens outside, in the router.
+//
+// IP forwarding is on, unlike on a fresh EC2 instance: Docker mounts
+// /proc/sys read-only, so a learner who builds a NAT instance could not turn
+// it on. The router's source/destination check still drops forwarded traffic
+// until the learner disables the check.
 func ensureInstance(ctx context.Context, in plan.Instance) (int, error) {
 	args := []string{
 		"--label", naming.LabelRole + "=" + naming.RoleInstance,
@@ -138,11 +143,27 @@ func ensureInstance(ctx context.Context, in plan.Instance) (int, error) {
 		"--network", "none",
 		"--hostname", in.Hostname,
 		"--cap-add", "NET_ADMIN",
+		"--sysctl", "net.ipv4.ip_forward=1",
 	}
 	for _, ns := range in.DNS {
 		args = append(args, "--dns", ns)
 	}
 	return ensure(ctx, in.Container, append(args, "--entrypoint", "sh", in.Image, "-c", idleCmd))
+}
+
+// ensureNATGateway starts the container that owns a NAT gateway's namespace.
+// Traffic enters and leaves through the same interface, so the namespace
+// must not send ICMP redirects.
+func ensureNATGateway(ctx context.Context, n plan.NATGateway, image string) (int, error) {
+	args := []string{
+		"--label", naming.LabelRole + "=" + naming.RoleNATGateway,
+		"--label", naming.LabelVPC + "=" + n.VPCID,
+		"--network", "none",
+		"--hostname", n.ID,
+		"--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", // for debugging with nft/tcpdump via docker exec
+	}
+	args = append(args, forwarderSysctls...)
+	return ensure(ctx, n.Container, append(args, "--entrypoint", "sh", image, "-c", idleCmd))
 }
 
 // stopInstance stops the container of a stopped instance and keeps it, so

@@ -23,9 +23,15 @@ func Apply(ctx context.Context, p *plan.Plan, opt Options) error {
 	desired := map[string]bool{}
 	for _, r := range p.Routers {
 		desired[r.Container] = true
+		for _, n := range r.NATGateways {
+			desired[n.Container] = true
+		}
 	}
 	for _, in := range p.Instances {
 		desired[in.Container] = true
+	}
+	for _, g := range p.TransitGateways {
+		desired[g.Container] = true
 	}
 	if p.Internet != nil {
 		desired[p.Internet.Container] = true
@@ -73,7 +79,8 @@ func Apply(ctx context.Context, p *plan.Plan, opt Options) error {
 		}
 		routerPIDs[r.VPCID] = pid
 	}
-	instancePIDs := map[string]int{}
+	// PIDs of the containers that hold ENIs, by container name.
+	eniPIDs := map[string]int{}
 	for _, in := range p.Instances {
 		if !in.Running {
 			// Stopping the container destroys its namespace and with it the
@@ -87,10 +94,37 @@ func Apply(ctx context.Context, p *plan.Plan, opt Options) error {
 		if err != nil {
 			return fmt.Errorf("instance %s: %w", in.ID, err)
 		}
-		instancePIDs[in.ID] = pid
+		eniPIDs[in.Container] = pid
 	}
 	for _, r := range p.Routers {
-		if err := applyRouter(ctx, r, routerPIDs[r.VPCID], internetPID, instancePIDs); err != nil {
+		for _, n := range r.NATGateways {
+			pid, err := ensureNATGateway(ctx, n, opt.RouterImage)
+			if err != nil {
+				return fmt.Errorf("NAT gateway %s: %w", n.ID, err)
+			}
+			if err := nftApply(ctx, pid, n.Ruleset); err != nil {
+				return fmt.Errorf("NAT gateway %s nftables: %w", n.ID, err)
+			}
+			eniPIDs[n.Container] = pid
+		}
+	}
+	// Links between namespaces come before the routers' routes, which use them.
+	for _, pc := range p.Peerings {
+		if err := ensurePeering(pc, routerPIDs); err != nil {
+			return fmt.Errorf("peering %s: %w", pc.ID, err)
+		}
+	}
+	for _, g := range p.TransitGateways {
+		pid, err := ensureTGW(ctx, g, opt.RouterImage)
+		if err != nil {
+			return fmt.Errorf("transit gateway %s: %w", g.ID, err)
+		}
+		if err := applyTGW(g, pid, routerPIDs); err != nil {
+			return fmt.Errorf("transit gateway %s: %w", g.ID, err)
+		}
+	}
+	for _, r := range p.Routers {
+		if err := applyRouter(ctx, r, routerPIDs[r.VPCID], internetPID, eniPIDs); err != nil {
 			return fmt.Errorf("router %s: %w", r.VPCID, err)
 		}
 	}

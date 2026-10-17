@@ -11,6 +11,22 @@ The tooling enables the definition of VPCs, Security groups and other AWS networ
 
 Long term goals include support for a `Coding Assessment Platform` that can host coding exercises relying on `vpcsim` network/security isolation and multi-tenancy. This is also a great opportunity to learn more about the various layers of isolation and offer the ability to pentest (also a local learning ability)
 
+## Quick start
+
+After the one-time WSL setup (`sudo bash scripts/setup-wsl.sh` inside the
+`Ubuntu-24.04` distro), from PowerShell in the repo root:
+
+```powershell
+.\vpclab up        # start Floci and vpcsim; keeps WSL running
+.\vpclab status    # instances with Name tag, state and IPs
+.\vpclab sh web    # shell on the instance with Name tag "web"
+.\vpclab dashboard # read-only AWS-console-style UI on http://localhost:4577
+.\vpclab down      # stop; .\vpclab up brings everything back
+.\vpclab reset     # delete all Floci state and start again
+```
+
+Inside WSL, `scripts/vpclab.sh` takes the same commands.
+
 ## How it works
 
 There are two pieces:

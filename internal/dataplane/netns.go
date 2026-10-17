@@ -76,7 +76,8 @@ func liveVeth(h *netlink.Handle, name string, target netns.NsHandle) (netlink.Li
 }
 
 // applyRouter brings one VPC router namespace to the planned state.
-func applyRouter(ctx context.Context, r plan.Router, routerPID, internetPID int, instancePIDs map[string]int) error {
+// eniPIDs maps the containers that hold the other end of ENIs to their PIDs.
+func applyRouter(ctx context.Context, r plan.Router, routerPID, internetPID int, eniPIDs map[string]int) error {
 	rt, err := openNS(routerPID)
 	if err != nil {
 		return err
@@ -93,15 +94,22 @@ func applyRouter(ctx context.Context, r plan.Router, routerPID, internetPID int,
 	want := map[string]bool{}
 	for _, e := range r.ENIs {
 		want[e.RouterIf] = true
-		pid, ok := instancePIDs[e.InstanceID]
+		pid, ok := eniPIDs[e.Container]
 		if !ok {
-			return fmt.Errorf("%s: no container for instance %s", e.ID, e.InstanceID)
+			return fmt.Errorf("%s: container %s is not running", e.ID, e.Container)
 		}
 		if err := ensureENI(rt.h, e, pid); err != nil {
 			return fmt.Errorf("%s: %w", e.ID, err)
 		}
 	}
-	if err := removeStaleENIs(rt.h, want); err != nil {
+	// Peering and TGW links were created before, in ensurePeering and applyTGW.
+	for _, p := range r.Peerings {
+		want[p.Ifname] = true
+	}
+	for _, a := range r.Attachments {
+		want[a.Ifname] = true
+	}
+	if err := removeStaleLinks(rt.h, want, "v", "p", "a"); err != nil {
 		return err
 	}
 	if err := syncRoutes(rt.h, r.Tables); err != nil {
@@ -242,30 +250,12 @@ func createENI(rh *netlink.Handle, e plan.ENI, instancePID int) (netlink.Link, e
 	return rh.LinkByName(e.RouterIf)
 }
 
-// removeStaleENIs deletes router-side veths (named v + hash) that are no
-// longer planned, e.g. a detached ENI. Deleting one end removes the pair.
-func removeStaleENIs(h *netlink.Handle, want map[string]bool) error {
-	links, err := h.LinkList()
-	if err != nil {
-		return err
-	}
-	for _, l := range links {
-		name := l.Attrs().Name
-		if l.Type() == "veth" && strings.HasPrefix(name, "v") && !want[name] {
-			if err := h.LinkDel(l); err != nil {
-				return fmt.Errorf("remove %s: %w", name, err)
-			}
-		}
-	}
-	return nil
-}
-
 func ownedTable(t int) bool {
 	return t == plan.TableDelivery || t == plan.TableBlackhole || (t >= plan.TableRTBase && t < plan.TableRTBase+10000)
 }
 
-func routeKey(table int, dst netip.Prefix, typ int, linkIndex int, gw net.IP) string {
-	return fmt.Sprintf("%d|%s|%d|%d|%s", table, dst, typ, linkIndex, gw)
+func routeKey(table int, dst netip.Prefix, typ int, linkIndex int, gw net.IP, metric int) string {
+	return fmt.Sprintf("%d|%s|%d|%d|%s|%d", table, dst, typ, linkIndex, gw, metric)
 }
 
 // syncRoutes makes the routes in every vpcsim-owned table match the plan.
@@ -274,7 +264,7 @@ func syncRoutes(h *netlink.Handle, tables []plan.Table) error {
 	want := map[string]bool{}
 	for _, t := range tables {
 		for _, r := range t.Routes {
-			nr := &netlink.Route{Table: t.ID, Dst: prefixNet(r.Dst)}
+			nr := &netlink.Route{Table: t.ID, Dst: prefixNet(r.Dst), Priority: r.Metric}
 			switch r.Kind {
 			case plan.RouteThrow:
 				nr.Type = unix.RTN_THROW
@@ -299,7 +289,7 @@ func syncRoutes(h *netlink.Handle, tables []plan.Table) error {
 				nr.Flags = int(netlink.FLAG_ONLINK)
 			}
 			desired = append(desired, nr)
-			want[routeKey(t.ID, r.Dst, nr.Type, nr.LinkIndex, nr.Gw)] = true
+			want[routeKey(t.ID, r.Dst, nr.Type, nr.LinkIndex, nr.Gw, nr.Priority)] = true
 		}
 	}
 
@@ -311,7 +301,7 @@ func syncRoutes(h *netlink.Handle, tables []plan.Table) error {
 		if !ownedTable(r.Table) {
 			continue
 		}
-		if !want[routeKey(r.Table, netPrefix(r.Dst), r.Type, r.LinkIndex, r.Gw)] {
+		if !want[routeKey(r.Table, netPrefix(r.Dst), r.Type, r.LinkIndex, r.Gw, r.Priority)] {
 			if err := h.RouteDel(&r); err != nil {
 				return fmt.Errorf("delete route %s table %d: %w", r.Dst, r.Table, err)
 			}

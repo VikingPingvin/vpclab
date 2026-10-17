@@ -33,7 +33,7 @@ commands:
   reset          remove the exercise and start it again from the beginning
   stop           remove the exercise's resources
 
-vpcsim must run in another terminal: scripts/vpcsim.sh run
+vpcsim must run: start the lab with scripts/vpclab.sh up
 
 environment:
   CAP_EXERCISES   exercise directory (default exercises)
@@ -150,7 +150,7 @@ func (a *app) start(ctx context.Context, name string) error {
 // The first start can include an image pull.
 func waitForInstances(ctx context.Context, ex *exercise.Exercise, st *exercise.State) error {
 	if !reconcilerRunning(ctx) {
-		return errors.New("the exercise exists in Floci, but vpcsim is not running; start scripts/vpcsim.sh run in another terminal, then run cap status")
+		return errors.New("the exercise exists in Floci, but vpcsim is not running; start the lab with scripts/vpclab.sh up, then run cap status")
 	}
 	fmt.Println("Waiting for vpcsim to start the instances...")
 	deadline := time.Now().Add(2 * time.Minute)
@@ -174,7 +174,8 @@ func waitForInstances(ctx context.Context, ex *exercise.Exercise, st *exercise.S
 	return nil
 }
 
-// reconcilerRunning reports whether scripts/vpcsim.sh run is active.
+// reconcilerRunning reports whether a reconciler runs: the background one of
+// vpclab up, or a foreground scripts/vpcsim.sh run.
 func reconcilerRunning(ctx context.Context) bool {
 	out, err := exec.CommandContext(ctx, "docker", "ps", "--no-trunc", "--format", "{{.Command}}").Output()
 	return err == nil && strings.Contains(string(out), "vpcsim run")
@@ -254,7 +255,7 @@ func (a *app) verify(ctx context.Context) error {
 		return err
 	}
 	if !reconcilerRunning(ctx) {
-		return errors.New("vpcsim is not running, so the network does not reflect your changes; start scripts/vpcsim.sh run in another terminal")
+		return errors.New("vpcsim is not running, so the network does not reflect your changes; start the lab with scripts/vpclab.sh up")
 	}
 	c, err := floci.EC2(ctx)
 	if err != nil {
